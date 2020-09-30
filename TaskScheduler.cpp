@@ -6,14 +6,17 @@ struct IUnknown;
 #include <taskschd.h>
 #include <comdef.h>
 #include <shellapi.h>
+#include <lmaccess.h>
+#include <lmapibuf.h>
+#include <LMErr.h>
 #define SECURITY_WIN32
 #include <Security.h>
 #pragma comment(lib, "taskschd.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "secur32.lib")
+#pragma comment(lib, "Netapi32.lib")
 
 #define APPNAME L ## "ElevatedNotepadExample"
-#define DO_USERNAME_CHECK 1
 
 int MainAdmin(PWSTR pCmdLine, int nCmdShow);
 
@@ -186,10 +189,41 @@ failed:
 
 }
 
-IRegisteredTask* GetThisTask()
+_bstr_t GetComputerName()
+{
+	//computer names are 15 characters max
+	const int MAXSIZE = 256;
+	DWORD bufferSize = MAXSIZE;
+	wchar_t buffer[MAXSIZE];
+	BOOL okay = GetComputerNameW(buffer, &bufferSize);
+	return buffer;
+}
+
+_bstr_t GetUserName()
+{
+	//usernames are 64 characters max
+	const int MAXSIZE = 256;
+	DWORD bufferSize = MAXSIZE;
+	wchar_t buffer[MAXSIZE];
+	BOOL okay = GetUserNameW(buffer, &bufferSize);
+	return buffer;
+}
+
+_bstr_t GetSamName()
+{
+	//SAM name should be 80 characters max
+	const int MAXSIZE = 256;
+	DWORD bufferSize = MAXSIZE;
+	wchar_t buffer[MAXSIZE];
+	GetUserNameExW(NameSamCompatible, buffer, &bufferSize);
+	return buffer;
+}
+
+IRegisteredTask* GetThisTask(const _bstr_t &userName)
 {
 	HRESULT hr = 0;
-	IRegisteredTask* task = GetScheduledTask(APPNAME);
+	_bstr_t taskName = APPNAME L" for " + userName;
+	IRegisteredTask* task = GetScheduledTask(taskName);
 	ITaskDefinition* taskDefinition = NULL;
 	IPrincipal* principal = NULL;
 	IActionCollection* actionCollection = NULL;
@@ -201,6 +235,7 @@ IRegisteredTask* GetThisTask()
 	wchar_t thisPath[MAX_PATH];
 	ULONG bufferSize = MAX_PATH;
 	_bstr_t userId;
+	_bstr_t samName = GetComputerName() + "\\" + userName;
 	TASK_RUNLEVEL_TYPE runLevel;
 	VARIANT_BOOL allowDemandStart;
 	VARIANT_BOOL enabled;
@@ -234,10 +269,7 @@ IRegisteredTask* GetThisTask()
 	hr = principal->get_RunLevel(&runLevel);
 	hr = principal->get_UserId(userId.GetAddress());
 	if (runLevel != TASK_RUNLEVEL_HIGHEST) { goto failed; }
-	GetUserNameExW(NameSamCompatible, thisPath, &bufferSize);
-#if DO_USERNAME_CHECK
-	if (0 != wcscmp(thisPath, userId.GetBSTR())) { goto failed; }
-#endif
+	if (userId != samName) { goto failed; }
 
 	//verify settings
 	hr = taskDefinition->get_Settings(&taskSettings);
@@ -277,7 +309,12 @@ failed:
 	return NULL;
 }
 
-bool CreateThisTask()
+IRegisteredTask* GetThisTask()
+{
+	return GetThisTask(GetUserName());
+}
+
+bool CreateThisTask(const _bstr_t &userName)
 {
 	HRESULT hr;
 	ITaskService* taskService = NULL;
@@ -291,7 +328,8 @@ bool CreateThisTask()
 	ITaskSettings* taskSettings = NULL;
 	_bstr_t path;
 	wchar_t thisPath[MAX_PATH];
-	_bstr_t userId;
+	_bstr_t userId = GetComputerName() + "\\" + userName;
+	_bstr_t taskName = APPNAME L" for " + userName;
 	ULONG bufferSize = MAX_PATH;
 
 	if (!GetModuleFileNameW(NULL, thisPath, ARRAYSIZE(thisPath))) { goto failed; }
@@ -320,8 +358,6 @@ bool CreateThisTask()
 	if (principal == NULL || !SUCCEEDED(hr)) { goto failed; }
 	hr = principal->put_RunLevel(TASK_RUNLEVEL_HIGHEST);
 	if (!SUCCEEDED(hr)) { goto failed; }
-	GetUserNameExW(NameSamCompatible, thisPath, &bufferSize);
-	userId = thisPath;
 	hr = principal->put_UserId(userId.GetBSTR());
 	if (!SUCCEEDED(hr)) { goto failed; }
 	hr = taskDefinition->put_Principal(principal);
@@ -348,7 +384,7 @@ bool CreateThisTask()
 	if (!SUCCEEDED(hr)) { goto failed; }
 	hr = taskDefinition->put_Settings(taskSettings);
 	if (!SUCCEEDED(hr)) { goto failed; }
-	hr = rootFolder->RegisterTaskDefinition(_bstr_t(APPNAME), taskDefinition, TASK_CREATE_OR_UPDATE, _variant_t(userId), _variant_t(), TASK_LOGON_INTERACTIVE_TOKEN, _variant_t(), &registeredTask);
+	hr = rootFolder->RegisterTaskDefinition(_bstr_t(taskName), taskDefinition, TASK_CREATE_OR_UPDATE, _variant_t(userId), _variant_t(), TASK_LOGON_INTERACTIVE_TOKEN, _variant_t(), &registeredTask);
 	if (registeredTask == NULL || !SUCCEEDED(hr)) { goto failed; }
 okay:
 	SafeRelease(taskService);
@@ -372,6 +408,40 @@ failed:
 	SafeRelease(principal);
 	SafeRelease(taskSettings);
 	return false;
+}
+
+bool CreateThisTask()
+{
+	return CreateThisTask(GetUserName());
+}
+
+bool CreateThisTaskForAllUsers()
+{
+	bool success = true;
+	BYTE* buffer = NULL;
+	DWORD entriesRead, totalEntries;
+	DWORD okay;
+	okay = NetUserEnum(NULL, 2, FILTER_NORMAL_ACCOUNT, &buffer, MAX_PREFERRED_LENGTH, &entriesRead, &totalEntries, NULL);
+	if (okay == NERR_Success)
+	{
+		USER_INFO_2* userInfoArray = (USER_INFO_2*)buffer;
+		for (int i = 0; i < entriesRead; i++)
+		{
+			USER_INFO_2& userInfo = userInfoArray[i];
+			DWORD flags = userInfo.usri2_flags;
+			DWORD priv = userInfo.usri2_priv;
+
+			bool isDisabled = flags & UF_ACCOUNTDISABLE;
+			bool isGuest = priv == USER_PRIV_GUEST;
+
+			if (!isDisabled && !isGuest)
+			{
+				success &= CreateThisTask(userInfo.usri2_name);
+			}
+		}
+	}
+	NetApiBufferFree(buffer);
+	return success;
 }
 
 bool RunTask(IRegisteredTask* task, LPCWSTR commandLine)
@@ -419,6 +489,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
 		RunElevated(pCmdLine, nCmdShow);
 		return 0;
 	}
-	CreateThisTask();
+	CreateThisTaskForAllUsers();
 	return MainAdmin(pCmdLine, nCmdShow);
 }
