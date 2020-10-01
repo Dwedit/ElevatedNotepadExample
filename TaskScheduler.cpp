@@ -442,6 +442,18 @@ bool CreateThisTaskForAllUsers()
 			bool isDisabled = flags & UF_ACCOUNTDISABLE;
 			bool isGuest = priv == USER_PRIV_GUEST;
 
+			//On a Windows 10 machine, there are sometimes fake entries in the users list:
+			//username will be something like "defaultuser100001"
+			//full_name will be "New User"
+			//priv will be USER_PRIV_GUEST
+			//params will be a GUID enclosed in brackets { }  (normal users do not have this GUID)
+			//Currently, the Guest filter will cover these, but if you want to allow other Guest users to match,
+			//you should filter out the fake users by the other fields.
+			//bool beginsWithDefaultuser = wcsstr(userInfo.usri2_name, L"defaultuser") == 0;
+			//bool nameIsNewUser = wcscmp(userInfo.usri2_full_name, L"New User") == 0;
+			//bool paramsContainsBrackets = userInfo.usri2_parms[0] == '{';
+			//bool isFakeUser = isGuest && beginsWithDefaultuser && nameIsNewUser && paramsContainsBrackets;
+
 			if (!isDisabled && !isGuest)
 			{
 				success &= CreateThisTask(userInfo.usri2_name, GetComputerName() + "\\" + userInfo.usri2_name);
