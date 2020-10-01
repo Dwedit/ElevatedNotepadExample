@@ -108,7 +108,6 @@ void RunElevated(LPCWSTR commandLine, int cmdShow)
 			ExitProcess(1);  // Quit itself
 		}
 	}
-
 }
 
 IRegisteredTask* GetScheduledTask(const wchar_t* taskName)
@@ -219,8 +218,21 @@ _bstr_t GetSamName()
 	return buffer;
 }
 
-IRegisteredTask* GetThisTask(const _bstr_t &userName)
+_bstr_t GetExeName()
 {
+	wchar_t buffer[MAX_PATH];
+	GetModuleFileNameW(NULL, buffer, ARRAYSIZE(buffer));
+	return buffer;
+}
+
+
+IRegisteredTask* GetThisTask(_bstr_t userName, _bstr_t samName)
+{
+	if (userName.length() == 0 || samName.length() == 0)
+	{
+		return NULL;
+	}
+
 	HRESULT hr = 0;
 	_bstr_t taskName = APPNAME L" for " + userName;
 	IRegisteredTask* task = GetScheduledTask(taskName);
@@ -232,10 +244,9 @@ IRegisteredTask* GetThisTask(const _bstr_t &userName)
 	ITaskSettings* taskSettings = NULL;
 	_bstr_t actionPath;
 	_bstr_t args;
-	wchar_t thisPath[MAX_PATH];
+	_bstr_t exePath = GetExeName();
 	ULONG bufferSize = MAX_PATH;
 	_bstr_t userId;
-	_bstr_t samName = GetComputerName() + "\\" + userName;
 	TASK_RUNLEVEL_TYPE runLevel;
 	VARIANT_BOOL allowDemandStart;
 	VARIANT_BOOL enabled;
@@ -255,8 +266,7 @@ IRegisteredTask* GetThisTask(const _bstr_t &userName)
 	if (!SUCCEEDED(hr) || execAction == NULL) { goto failed; }
 	hr = execAction->get_Path(actionPath.GetAddress());
 	if (!SUCCEEDED(hr)) { goto failed; }
-	if (!GetModuleFileNameW(NULL, thisPath, ARRAYSIZE(thisPath))) { goto failed; }
-	if (!IsSameFile(actionPath, thisPath)) { goto failed; }
+	if (!IsSameFile(actionPath, exePath)) { goto failed; }
 	
 	//verify arguments
 	hr = execAction->get_Arguments(args.GetAddress());
@@ -274,9 +284,6 @@ IRegisteredTask* GetThisTask(const _bstr_t &userName)
 	//verify settings
 	hr = taskDefinition->get_Settings(&taskSettings);
 	if (taskSettings == NULL || !SUCCEEDED(hr)) { goto failed; }
-	taskSettings->get_AllowDemandStart(&allowDemandStart);
-	taskSettings->get_Enabled(&enabled);
-
 	hr = taskSettings->get_AllowDemandStart(&allowDemandStart);
 	if (!SUCCEEDED(hr)) { goto failed; }
 	hr = taskSettings->get_Enabled(&enabled);
@@ -311,11 +318,16 @@ failed:
 
 IRegisteredTask* GetThisTask()
 {
-	return GetThisTask(GetUserName());
+	return GetThisTask(GetUserName(), GetSamName());
 }
 
-bool CreateThisTask(const _bstr_t &userName)
+bool CreateThisTask(_bstr_t userName, _bstr_t samName)
 {
+	if (userName.length() == 0 || samName.length() == 0)
+	{
+		return false;
+	}
+
 	HRESULT hr;
 	ITaskService* taskService = NULL;
 	ITaskDefinition* taskDefinition = NULL;
@@ -326,13 +338,10 @@ bool CreateThisTask(const _bstr_t &userName)
 	IExecAction* execAction = NULL;
 	IPrincipal* principal = NULL;
 	ITaskSettings* taskSettings = NULL;
-	_bstr_t path;
-	wchar_t thisPath[MAX_PATH];
-	_bstr_t userId = GetComputerName() + "\\" + userName;
+	_bstr_t exePath = GetExeName();
 	_bstr_t taskName = APPNAME L" for " + userName;
 	ULONG bufferSize = MAX_PATH;
 
-	if (!GetModuleFileNameW(NULL, thisPath, ARRAYSIZE(thisPath))) { goto failed; }
 	hr = CoCreateInstance(CLSID_TaskScheduler, NULL, CLSCTX_INPROC_SERVER, IID_ITaskService, (void**)&taskService);
 	if (taskService == NULL || !SUCCEEDED(hr)) { goto failed; }
 	hr = taskService->Connect(_variant_t(), _variant_t(), _variant_t(), _variant_t());
@@ -347,8 +356,7 @@ bool CreateThisTask(const _bstr_t &userName)
 	if (action == NULL || !SUCCEEDED(hr)) { goto failed; }
 	hr = action->QueryInterface(&execAction);
 	if (execAction == NULL || !SUCCEEDED(hr)) { goto failed; }
-	path = thisPath;
-	hr = execAction->put_Path(path);
+	hr = execAction->put_Path(exePath);
 	if (!SUCCEEDED(hr)) { goto failed; }
 	hr = execAction->put_Arguments(_bstr_t(L"$(Arg0)"));
 	if (!SUCCEEDED(hr)) { goto failed; }
@@ -358,7 +366,7 @@ bool CreateThisTask(const _bstr_t &userName)
 	if (principal == NULL || !SUCCEEDED(hr)) { goto failed; }
 	hr = principal->put_RunLevel(TASK_RUNLEVEL_HIGHEST);
 	if (!SUCCEEDED(hr)) { goto failed; }
-	hr = principal->put_UserId(userId.GetBSTR());
+	hr = principal->put_UserId(samName.GetBSTR());
 	if (!SUCCEEDED(hr)) { goto failed; }
 	hr = taskDefinition->put_Principal(principal);
 	if (!SUCCEEDED(hr)) { goto failed; }
@@ -384,7 +392,7 @@ bool CreateThisTask(const _bstr_t &userName)
 	if (!SUCCEEDED(hr)) { goto failed; }
 	hr = taskDefinition->put_Settings(taskSettings);
 	if (!SUCCEEDED(hr)) { goto failed; }
-	hr = rootFolder->RegisterTaskDefinition(_bstr_t(taskName), taskDefinition, TASK_CREATE_OR_UPDATE, _variant_t(userId), _variant_t(), TASK_LOGON_INTERACTIVE_TOKEN, _variant_t(), &registeredTask);
+	hr = rootFolder->RegisterTaskDefinition(taskName, taskDefinition, TASK_CREATE_OR_UPDATE, _variant_t(samName), _variant_t(), TASK_LOGON_INTERACTIVE_TOKEN, _variant_t(), &registeredTask);
 	if (registeredTask == NULL || !SUCCEEDED(hr)) { goto failed; }
 okay:
 	SafeRelease(taskService);
@@ -412,7 +420,7 @@ failed:
 
 bool CreateThisTask()
 {
-	return CreateThisTask(GetUserName());
+	return CreateThisTask(GetUserName(), GetSamName());
 }
 
 bool CreateThisTaskForAllUsers()
@@ -436,11 +444,22 @@ bool CreateThisTaskForAllUsers()
 
 			if (!isDisabled && !isGuest)
 			{
-				success &= CreateThisTask(userInfo.usri2_name);
+				success &= CreateThisTask(userInfo.usri2_name, GetComputerName() + "\\" + userInfo.usri2_name);
 			}
 		}
 	}
 	NetApiBufferFree(buffer);
+
+	//In the event that ComputerName\UserName wasn't enough to get the current SAM name, force trying the current SAM name
+	IRegisteredTask* currentUserTask = GetThisTask();
+	if (currentUserTask == NULL)
+	{
+		success &= CreateThisTask();
+	}
+	else
+	{
+		SafeRelease(currentUserTask);
+	}
 	return success;
 }
 
